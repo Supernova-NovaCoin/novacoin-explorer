@@ -1,0 +1,157 @@
+# NovaCoin Explorer - Blockscout Configuration
+# Ethereum-compatible blockchain explorer
+
+version: '3.9'
+
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:15-alpine
+    container_name: novacoin-explorer-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: blockscout
+      POSTGRES_USER: blockscout
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-blockscout_password}
+    volumes:
+      - explorer-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blockscout -d blockscout"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - explorer-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: novacoin-explorer-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - explorer-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - explorer-network
+
+  # Blockscout Backend
+  backend:
+    image: blockscout/blockscout:latest
+    container_name: novacoin-explorer-backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - ./config/common.env
+      - ./config/${NETWORK:-testnet}.env
+    environment:
+      DATABASE_URL: postgresql://blockscout:${DB_PASSWORD:-blockscout_password}@db:5432/blockscout
+      ETHEREUM_JSONRPC_HTTP_URL: ${RPC_URL:-http://host.docker.internal:8545}
+      ETHEREUM_JSONRPC_WS_URL: ${WS_URL:-ws://host.docker.internal:8546}
+      CHAIN_ID: ${CHAIN_ID:-1}
+    ports:
+      - "${EXPLORER_PORT:-4000}:4000"
+    volumes:
+      - explorer-logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/api/v2/stats"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - explorer-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Blockscout Frontend (optional, for custom UI)
+  frontend:
+    image: ghcr.io/blockscout/frontend:latest
+    container_name: novacoin-explorer-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      NEXT_PUBLIC_API_HOST: localhost
+      NEXT_PUBLIC_API_PORT: ${EXPLORER_PORT:-4000}
+      NEXT_PUBLIC_API_PROTOCOL: http
+      NEXT_PUBLIC_NETWORK_NAME: ${NETWORK_NAME:-NovaCoin}
+      NEXT_PUBLIC_NETWORK_SHORT_NAME: ${NETWORK_SHORT_NAME:-NOVA}
+      NEXT_PUBLIC_NETWORK_ID: ${CHAIN_ID:-1}
+      NEXT_PUBLIC_NETWORK_CURRENCY_NAME: NovaCoin
+      NEXT_PUBLIC_NETWORK_CURRENCY_SYMBOL: NOVA
+      NEXT_PUBLIC_NETWORK_CURRENCY_DECIMALS: 18
+      NEXT_PUBLIC_HOMEPAGE_CHARTS: "['daily_txs', 'coin_price', 'market_cap']"
+      NEXT_PUBLIC_IS_TESTNET: ${IS_TESTNET:-true}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    networks:
+      - explorer-network
+
+  # Smart Contract Verification Service
+  smart-contract-verifier:
+    image: ghcr.io/blockscout/smart-contract-verifier:latest
+    container_name: novacoin-sc-verifier
+    restart: unless-stopped
+    environment:
+      SMART_CONTRACT_VERIFIER__SERVER__HTTP__ENABLED: "true"
+      SMART_CONTRACT_VERIFIER__SERVER__HTTP__ADDR: 0.0.0.0:8050
+      SMART_CONTRACT_VERIFIER__SOLIDITY__ENABLED: "true"
+      SMART_CONTRACT_VERIFIER__VYPER__ENABLED: "true"
+    ports:
+      - "${VERIFIER_PORT:-8050}:8050"
+    networks:
+      - explorer-network
+
+  # Visualizer Service (for contract visualization)
+  visualizer:
+    image: ghcr.io/blockscout/visualizer:latest
+    container_name: novacoin-visualizer
+    restart: unless-stopped
+    environment:
+      VISUALIZER__SERVER__HTTP__ENABLED: "true"
+      VISUALIZER__SERVER__HTTP__ADDR: 0.0.0.0:8151
+    ports:
+      - "${VISUALIZER_PORT:-8151}:8151"
+    networks:
+      - explorer-network
+
+  # Stats Service
+  stats:
+    image: ghcr.io/blockscout/stats:latest
+    container_name: novacoin-stats
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      STATS__DB_URL: postgresql://blockscout:${DB_PASSWORD:-blockscout_password}@db:5432/blockscout
+      STATS__BLOCKSCOUT_DB_URL: postgresql://blockscout:${DB_PASSWORD:-blockscout_password}@db:5432/blockscout
+      STATS__CREATE_DATABASE: "false"
+      STATS__RUN_MIGRATIONS: "true"
+      STATS__SERVER__HTTP__ENABLED: "true"
+      STATS__SERVER__HTTP__ADDR: 0.0.0.0:8153
+    ports:
+      - "${STATS_PORT:-8153}:8153"
+    networks:
+      - explorer-network
+
+volumes:
+  explorer-db:
+    driver: local
+  explorer-redis:
+    driver: local
+  explorer-logs:
+    driver: local
+
+networks:
+  explorer-network:
+    driver: bridge
